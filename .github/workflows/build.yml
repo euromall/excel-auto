@@ -1,0 +1,31 @@
+name: build-exe
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m unittest -v
+      - run: python -c "import excelauto.gui"
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt pyinstaller==6.11.1
+      - run: pyinstaller --noconfirm --onefile --windowed --name ExcelAuto main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ExcelAuto
+          path: dist/ExcelAuto.exe

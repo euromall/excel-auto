@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+ExcelAuto.ini
+# 실제 업무 파일(수령인 개인정보)은 저장소에 올리지 않는다
+*.xlsx
+*.xlsm
+*.xls
+!tests/fixtures/*.xlsx
