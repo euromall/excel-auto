@@ -6,7 +6,11 @@ import os
 from dataclasses import dataclass, asdict
 from typing import Callable
 
+import openpyxl
+
+from . import base_writer
 from .base_ref import load_base
+from .mango import read_mango
 from .shipping import build_rows, write_shipping
 from .shopmine import read_shopmine
 
@@ -20,6 +24,7 @@ class Settings:
     shopmine_dir: str = ''       # folder where the 샵마인 export is saved (newest 발송대기*.xlsx is used)
     output_dir: str = ''         # ...\InvoiceAuto\ShippingInvoice
     pts_file: str = ''           # 00_EMG_PTS_....xlsm (optional, only to suggest the start HAWB)
+    mango_dir: str = ''          # folder where the 망고 주문서 is saved (newest file with the 망고 header is used)
 
 
 def load_settings(path) -> Settings:
@@ -72,4 +77,57 @@ def run(shopmine_file: str, base_file: str, output_dir: str, start_hawb: str,
     write_shipping(res.rows, path, work_date)
     log('')
     log(f'완료: {len(res.rows)}행 → {path}')
+    return path
+
+
+def newest_mango(folder: str) -> str:
+    """Newest .xlsx in the folder whose first cell is 마켓주문일자 (the 망고 주문서 layout)."""
+    files = [f for f in glob.glob(os.path.join(folder, '*.xlsx')) if not os.path.basename(f).startswith('~$')]
+    for f in sorted(files, key=os.path.getmtime, reverse=True):
+        try:
+            wb = openpyxl.load_workbook(f, read_only=True)
+            a1 = wb.worksheets[0].cell(1, 1).value
+            wb.close()
+        except Exception:      # not a readable workbook: skip it
+            continue
+        if str(a1 or '').strip() == '마켓주문일자':
+            return f
+    raise FileNotFoundError(f'"{folder}" 폴더에 망고 주문서(A1=마켓주문일자) 파일이 없습니다.')
+
+
+def run_mango(mango_file: str, base_file: str, work_date: dt.date, fallback_dir: str = '',
+              log: Callable[[str], None] = print, writer=None) -> bool:
+    """Steps 2-3: 망고 주문서 -> Base.xlsx newPrice. Returns True when Base.xlsx was changed."""
+    log(f'망고 주문서: {mango_file}')
+    rows = read_mango(mango_file)
+    log(f'  주문 {len(rows)}건')
+    plan = base_writer.make_plan(base_file, rows)
+    for s in plan.skipped:
+        log(f'  건너뜀: {s}')
+    if not plan.rows:
+        log('추가할 새 주문이 없습니다.')
+        return False
+    for br in plan.rows:
+        log(f'  추가: {br.order_no}  {br.name[:60]}')
+    log(f'Base.xlsx newPrice {plan.separator_row}행에 날짜, {plan.first_row}~{plan.first_row + len(plan.rows) - 1}행에 {len(plan.rows)}건')
+    bak = base_writer.backup(base_file)
+    log(f'백업: {bak}')
+    try:
+        (writer or base_writer.write_with_excel)(base_file, plan, work_date)
+    except ImportError:
+        path = _fallback_file(plan, work_date, fallback_dir or os.path.dirname(os.path.abspath(base_file)))
+        log('엑셀 자동 입력을 쓸 수 없어(pywin32 없음) 붙여넣기용 파일을 만들었습니다: ' + path)
+        return False
+    log('완료: Base.xlsx 저장')
+    return True
+
+
+def _fallback_file(plan, work_date: dt.date, folder: str) -> str:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Base추가분'
+    for br in plan.rows:
+        ws.append(br.values)
+    path = os.path.join(folder, f'Base_추가분_{work_date:%Y%m%d}.xlsx')
+    wb.save(path)
     return path
