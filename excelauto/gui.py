@@ -19,14 +19,14 @@ def program_dir() -> str:
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title('ExcelAuto - 적하 작성 (6~8단계)')
+        root.title('ExcelAuto - ① 망고→Base (2~3단계)  ② 적하 작성 (6~8단계)')
         self.ini = os.path.join(program_dir(), job.INI_NAME)
         s = job.load_settings(self.ini)
-        self.vars = {k: tk.StringVar(value=getattr(s, k)) for k in ('base_file', 'shopmine_dir', 'output_dir', 'pts_file')}
+        self.vars = {k: tk.StringVar(value=getattr(s, k)) for k in ('mango_dir', 'base_file', 'shopmine_dir', 'output_dir', 'pts_file')}
         self.v_hawb = tk.StringVar()
         self.v_date = tk.StringVar(value=dt.date.today().isoformat())
 
-        rows = [('Base.xlsx', 'base_file', 'file'), ('샵마인 다운로드 폴더', 'shopmine_dir', 'dir'),
+        rows = [('망고 주문서 다운로드 폴더', 'mango_dir', 'dir'), ('Base.xlsx', 'base_file', 'file'), ('샵마인 다운로드 폴더', 'shopmine_dir', 'dir'),
                 ('결과 폴더 (InvoiceAuto\\ShippingInvoice)', 'output_dir', 'dir'), ('적하 파일 PTS (선택)', 'pts_file', 'file')]
         for i, (label, k, kind) in enumerate(rows):
             tk.Label(root, text=label, anchor='w').grid(row=i, column=0, sticky='w', padx=6, pady=3)
@@ -43,7 +43,9 @@ class App:
         bar = tk.Frame(root)
         bar.grid(row=r, column=0, columnspan=3, pady=6)
         tk.Button(bar, text='설정 저장', command=self.save).pack(side='left', padx=6)
-        self.btn = tk.Button(bar, text='적하 작성 실행', command=self.start, bg='#d9ead3')
+        self.btn_mango = tk.Button(bar, text='① 망고 → Base 추가', command=self.start_mango, bg='#fff2cc')
+        self.btn_mango.pack(side='left', padx=6)
+        self.btn = tk.Button(bar, text='② 적하 작성 실행', command=self.start, bg='#d9ead3')
         self.btn.pack(side='left', padx=6)
         r += 1
         self.out = scrolledtext.ScrolledText(root, width=110, height=24)
@@ -104,6 +106,33 @@ class App:
                 self.log(f'오류: {e}')
             finally:
                 self.root.after(0, lambda: self.btn.config(state='normal'))
+        threading.Thread(target=work, daemon=True).start()
+
+    def start_mango(self):
+        s = self.settings()
+        try:
+            work_date = dt.date.fromisoformat(self.v_date.get().strip())
+        except ValueError:
+            messagebox.showerror('작업일', '작업일은 2026-11-24 형식으로 입력하세요.')
+            return
+        if not s.mango_dir or not s.base_file:
+            messagebox.showerror('설정', '망고 폴더와 Base.xlsx를 지정하세요.')
+            return
+        if not messagebox.askokcancel('망고 → Base', 'Base.xlsx를 엑셀에서 닫았는지 확인하세요.\n'
+                                      '(실행 전 Base\\backup 폴더에 자동 백업)'):
+            return
+        self.btn_mango.config(state='disabled')
+        self.out.delete('1.0', 'end')
+
+        def work():
+            try:
+                f = job.newest_mango(s.mango_dir)
+                if job.run_mango(f, s.base_file, work_date, s.output_dir, self.log):
+                    self.log('다음: 샵마인 주문서를 내려받고 ② 적하 작성을 실행하세요.')
+            except Exception as e:     # show any error in the window instead of crashing
+                self.log(f'오류: {e}')
+            finally:
+                self.root.after(0, lambda: self.btn_mango.config(state='normal'))
         threading.Thread(target=work, daemon=True).start()
 
 
