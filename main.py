@@ -1,5 +1,7 @@
 """Entry point for PyInstaller: ExcelAuto.exe (window)."""
-from excelauto.gui import main
+import sys
+
+from excelauto.ui.app import main
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

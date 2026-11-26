@@ -32,6 +32,7 @@ class BuildResult:
     rows: List[list] = field(default_factory=list)       # 78 values per row
     missing: List[str] = field(default_factory=list)     # rows whose item name was not found
     found_rows: List[str] = field(default_factory=list)  # log lines
+    preview: List[tuple] = field(default_factory=list)   # (관리번호, 품명 or '', 수량, ok) per 샵마인 row
 
 
 def build_rows(shop_rows: List[ShopmineRow], base: BaseRef, start_hawb: str = '') -> BuildResult:
@@ -41,7 +42,9 @@ def build_rows(shop_rows: List[ShopmineRow], base: BaseRef, start_hawb: str = ''
         item = base.find(no)
         if item is None:
             res.missing.append(f'샵마인 {sr.row}행 {sr.manage_no}: 번호 {no or "(없음)"} 이(가) Base newPrice에 없음')
+            res.preview.append((sr.manage_no, '', sr.qty, False))
             continue
+        res.preview.append((sr.manage_no, item.name, sr.qty, True))
         v = [None] * NCOLS
         v[0] = '-'
         v[2:19] = sr.block()                     # C..S  <- 샵마인 F..V

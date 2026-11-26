@@ -25,6 +25,7 @@ class Settings:
     output_dir: str = ''         # ...\InvoiceAuto\ShippingInvoice
     pts_file: str = ''           # 00_EMG_PTS_....xlsm (optional, only to suggest the start HAWB)
     mango_dir: str = ''          # folder where the 망고 주문서 is saved (newest file with the 망고 header is used)
+    invoice_exe: str = ''        # InvoiceAuto.exe (optional, for the 인보이스 실행 button)
 
 
 def load_settings(path) -> Settings:

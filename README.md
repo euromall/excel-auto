@@ -2,7 +2,7 @@
 
 주문·적하 엑셀 반복작업 자동화. 인보이스 프로그램(InvoiceAuto, `invoice_2610`)과 **별도로** 만들어 테스트한 뒤 합칠 예정.
 
-## 현재 기능 (v0.2)
+## 현재 기능 (v0.3)
 
 | 기능 | 대체하는 작업 | 상태 |
 |---|---|---|
@@ -29,10 +29,19 @@
 5. `InvoiceAuto\ShippingInvoice` 폴더에 `Shipping_YYYYMMDD_HHMMSS.xlsx`로 저장
 6. **품명을 못 찾은 주문이 하나라도 있으면 파일을 만들지 않고 목록을 보여줌** (InvoiceAuto는 품명 없는 행을 건너뛰므로 누락 방지)
 
+## 화면 (v0.3, A안 단계 안내형, PySide6)
+
+- 왼쪽에 오늘 할 일 5단계(망고 → Base, 적하 작성, 인보이스 실행, CR·송장 업로드 파일, 출고 체크), 완료 표시와 "지금 할 차례"
+- 실행 전 미리보기 표: 새로 추가할 주문 / 이미 있는 주문, 품명 찾음 / 확인 필요
+- 시작 송장번호: 지난 Shipping 파일의 시작 번호 + 건수로 다음 번호를 제안 (번호가 1씩 증가한다는 가정. 실행 전 확인)
+- 실행 시작 때 "불러오는 중" 스플래시 (PyInstaller `--splash`), 창이 열리면 맨 앞으로, 이미 실행 중이면 새로 열지 않고 기존 창을 앞으로
+- 작업 기록·완료 단계는 exe 옆 `ExcelAuto_state.json`에 저장
+
 ## 받기 / 실행
 
 - GitHub → Actions → build-exe → 최근 실행 → Artifacts `ExcelAuto` 다운로드 → `ExcelAuto.exe`를 원하는 폴더에 두고 실행 (Python 설치 불필요)
-- 처음 실행 시 경로 4개 지정 후 `설정 저장` (같은 폴더에 `ExcelAuto.ini` 생성)
+- 처음 실행 시 `설정`에서 경로 지정 (같은 폴더에 `ExcelAuto.ini` 생성)
+- 스플래시 그림은 `python tools/make_splash.py`로 다시 만들 수 있음
 
 ## 개인정보
 
