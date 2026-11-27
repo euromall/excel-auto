@@ -47,11 +47,33 @@ def save_settings(path, s: Settings):
         cp.write(f)
 
 
+def _is_shopmine(path: str) -> bool:
+    """First row has the 샵마인 발송대기 header (관리번호, 대표주문번호, 상품수량 ...)."""
+    from .shopmine import EXPECTED
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True)
+        ws = wb.worksheets[0]
+        ws.reset_dimensions()      # the 샵마인 export says its size is A1 only; read the real row
+        row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
+        wb.close()
+    except Exception:          # not a readable workbook
+        return False
+    row = list(row)
+    return all(c < len(row) and str(row[c] or '').strip() == n for c, n in EXPECTED.items())
+
+
 def newest_shopmine(folder: str) -> str:
-    files = [f for f in glob.glob(os.path.join(folder, '발송대기*.xlsx')) if not os.path.basename(f).startswith('~$')]
-    if not files:
-        raise FileNotFoundError(f'"{folder}" 폴더에 발송대기*.xlsx 파일이 없습니다.')
-    return max(files, key=os.path.getmtime)
+    """Newest 발송대기*.xlsx; when there is none, the newest .xlsx whose header is the 샵마인 layout."""
+    if not folder or not os.path.isdir(folder):
+        raise FileNotFoundError(f'샵마인 폴더가 없습니다: "{folder}"')
+    files = [f for f in glob.glob(os.path.join(folder, '*.xlsx')) if not os.path.basename(f).startswith('~$')]
+    named = [f for f in files if os.path.basename(f).startswith('발송대기')]
+    if named:
+        return max(named, key=os.path.getmtime)
+    for f in sorted(files, key=os.path.getmtime, reverse=True):
+        if _is_shopmine(f):
+            return f
+    raise FileNotFoundError(f'"{folder}" 폴더의 xlsx {len(files)}개 중 샵마인 발송대기 형식(1행에 관리번호·대표주문번호·상품수량 등) 파일이 없습니다.')
 
 
 def run(shopmine_file: str, base_file: str, output_dir: str, start_hawb: str,

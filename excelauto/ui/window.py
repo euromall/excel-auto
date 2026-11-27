@@ -301,13 +301,18 @@ class MangoPage(Page):
         self.notice.hide()
         self.table.setRowCount(0)
         self.base_card.set(os.path.basename(s.base_file) if s.base_file else '지정되지 않음', not s.base_file)
+        why = ''
         try:
             self.file = job.newest_mango(s.mango_dir) if s.mango_dir else ''
-        except FileNotFoundError:
-            self.file = ''
+        except FileNotFoundError as e:
+            self.file, why = '', str(e)
         self.mango_card.set(os.path.basename(self.file) if self.file else '망고 주문서를 찾지 못했습니다', not self.file)
-        if not (self.file and s.base_file):
+        if not s.mango_dir or not s.base_file:
             self.status.setText('설정에서 망고 폴더와 Base.xlsx를 지정하세요.')
+            return
+        if not self.file:
+            self.notice.setText(why + '\n망고에서 받은 주문서를 이 폴더에 두거나, 파일 카드의 "변경"으로 폴더를 다시 지정하세요.')
+            self.notice.show()
             return
         self.status.setText('미리보기를 만드는 중…')
         f, base, gpath, tr = self.file, s.base_file, self.glossary_path(), translator_for(s)
@@ -429,9 +434,22 @@ class MangoPage(Page):
         self.done_note.show()
 
     def open_addition(self):
+        base = self.win.settings.base_file
+        if not base:
+            QMessageBox.information(self, '추가분 파일', '설정에서 Base.xlsx를 먼저 지정하세요.')
+            return
         info = self.win.state.step(self.win.day(), 'mango') or {}
-        if info.get('path') and os.path.exists(info['path']):
-            self.win.open_path(info['path'])
+        files = addition.files_for(addition.folder_for(base), self.win.day())
+        path = info.get('path') if info.get('path') and os.path.exists(info['path']) else (files[-1] if files else '')
+        if path:
+            self.win.open_path(path)
+            return
+        folder = addition.folder_for(base)
+        QMessageBox.information(self, '추가분 파일',
+                                f'{self.win.day().isoformat()} 날짜로 만든 추가분 파일이 아직 없습니다.\n'
+                                f'미리보기를 확인한 뒤 오른쪽 아래 "추가분 파일 만들기"를 누르세요.\n\n저장 폴더: {folder}')
+        if os.path.isdir(folder):
+            self.win.open_path(folder)
 
 
 class ShippingPage(Page):
@@ -492,13 +510,19 @@ class ShippingPage(Page):
         if self.extra:
             base_txt += f' + 오늘 추가분 {len(self.extra)}개'
         self.base_card.set(base_txt, not s.base_file)
+        why = ''
         try:
             self.file = job.newest_shopmine(s.shopmine_dir) if s.shopmine_dir else ''
-        except FileNotFoundError:
-            self.file = ''
-        self.shop_card.set(os.path.basename(self.file) if self.file else '발송대기 파일을 찾지 못했습니다', not self.file)
-        if not (self.file and s.base_file):
+        except FileNotFoundError as e:
+            self.file, why = '', str(e)
+        self.shop_card.set(os.path.basename(self.file) if self.file else '샵마인 파일을 찾지 못했습니다', not self.file)
+        if not s.shopmine_dir or not s.base_file:
             self.status.setText('설정에서 샵마인 폴더와 Base.xlsx를 지정하세요.')
+            return
+        if not self.file:
+            self.notice.setText(why + '\n샵마인에서 받은 파일을 이 폴더에 두거나, 파일 카드의 "변경"으로 폴더를 다시 지정하세요.')
+            self.notice.show()
+            self.status.setText('샵마인 폴더: ' + s.shopmine_dir)
             return
         self.status.setText('미리보기를 만드는 중…')
         f, base, extra = self.file, s.base_file, list(self.extra)
