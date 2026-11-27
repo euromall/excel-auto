@@ -47,4 +47,7 @@ jobs:
         run: |
           cd dist && 7z a -tzip "ExcelAuto_v${{ steps.ver.outputs.v }}.zip" ExcelAuto > /dev/null
           awk '/^## v${{ steps.ver.outputs.v }} /{f=1;next} /^## v/{f=0} f' ../변경기록.md > notes.md
-          gh release create "${GITHUB_REF_NAME}" "ExcelAuto_v${{ steps.ver.outputs.v }}.zip" --repo "${GITHUB_REPOSITORY}" --title "ExcelAuto v${{ steps.ver.outputs.v }}" --notes-file notes.md
+          # the release may already exist (made on GitHub by hand): then only attach the zip
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --title "ExcelAuto v${{ steps.ver.outputs.v }}" --notes-file notes.md
+          gh release upload "${GITHUB_REF_NAME}" "ExcelAuto_v${{ steps.ver.outputs.v }}.zip" --repo "${GITHUB_REPOSITORY}" --clobber
