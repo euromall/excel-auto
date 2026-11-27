@@ -26,8 +26,8 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt pyinstaller==6.11.1
-      - run: pyinstaller --noconfirm --onefile --windowed --name ExcelAuto --splash assets/splash.png main.py
+      - run: pyinstaller --noconfirm --onedir --windowed --name ExcelAuto --splash assets/splash.png main.py
       - uses: actions/upload-artifact@v4
         with:
           name: ExcelAuto
-          path: dist/ExcelAuto.exe
+          path: dist/ExcelAuto/

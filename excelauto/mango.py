@@ -71,6 +71,7 @@ class BaseRow:
     values: list        # newPrice A..S (19 values)
     order_no: str
     name: str
+    full_name: str = ''  # name before the 99-byte cut (Korean words are replaced on this one)
 
 
 def convert_row(r: list) -> BaseRow:
@@ -78,9 +79,8 @@ def convert_row(r: list) -> BaseRow:
     opt1 = substitute(text(r[M_OPT1]), OPT1_RULES)
     opt2 = substitute(text(r[M_OPT2]), OPT2_RULES)
     raw = '' if cost_txt == '' else f'{text(r[M_NAME])}{opt1}{opt2}_{math.floor(to_float(cost_txt))}'   # 중간!L
-    name = substitute(raw, NAME_RULES)                                                             # 중간!M
-    if lenb(name) > 99:                                                                            # 중간!N
-        name = name[:70] + name[-29:]
+    full = substitute(raw, NAME_RULES)                                                             # 중간!M
+    name = cut_name(full)                                                                          # 중간!N
     brand = substitute(text(r[M_BRAND]), BRAND_RULES)                                              # 중간!U
     if len(brand) > 18:                                                                            # 중간!V
         brand = brand[:9] + brand[-9:]
@@ -118,7 +118,35 @@ def convert_row(r: list) -> BaseRow:
         brand,                                  # R 제조사
         blank(text(r[M_COUNTRY])),              # S 제조국가코드
     ]
-    return BaseRow(values=values, order_no=order_no, name=name)
+    return BaseRow(values=values, order_no=order_no, name=name, full_name=full)
+
+
+def cut_name(name: str) -> str:
+    """중간!N: names over 99 bytes keep the first 70 and the last 29 characters."""
+    return name[:70] + name[-29:] if lenb(name) > 99 else name
+
+
+# characters DeepL/glossary words may bring back in (same replacements as 중간!M)
+TIDY_RULES = [r for r in NAME_RULES if not any('\uac00' <= ch <= '\ud7a3' for ch in r[0])]
+
+
+def localize(rows: List[BaseRow], glossary) -> List[BaseRow]:
+    """Removes Korean option labels and replaces known Korean phrases (see translate.py).
+
+    Returns the rows that still contain Korean (they must be fixed before the file is made).
+    """
+    from . import translate
+    left = []
+    for br in rows:
+        full = translate.apply(br.full_name or br.name, glossary)
+        full = substitute(full, TIDY_RULES)
+        while '  ' in full:
+            full = full.replace('  ', ' ')
+        br.name = cut_name(full)
+        br.values[8] = br.name
+        if translate.has_hangul(br.name):
+            left.append(br)
+    return left
 
 
 def check_header(header: list):
@@ -131,9 +159,15 @@ def check_header(header: list):
         raise ValueError('망고 주문서 열 구성이 예상과 다릅니다.\n' + '\n'.join(wrong))
 
 
-def read_mango(path) -> List[BaseRow]:
+def read_mango(path, progress=None) -> List[BaseRow]:
+    from .progress import tick
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    rows = [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
+    ws = wb.worksheets[0]
+    total = ws.max_row
+    rows = []
+    for i, r in enumerate(ws.iter_rows(values_only=True)):
+        tick(progress, i, total)
+        rows.append(list(r))
     wb.close()
     if not rows:
         raise ValueError(f'망고 주문서가 비어 있습니다: {path}')

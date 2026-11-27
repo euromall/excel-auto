@@ -41,14 +41,17 @@ def is_template(row_values) -> bool:
     return text(row_values[C_ORDER - 1]) == TEMPLATE_MARK and not text(row_values[C_NAME - 1])
 
 
-def make_plan(base_path: str, new_rows: List[BaseRow]) -> Plan:
+def make_plan(base_path: str, new_rows: List[BaseRow], progress=None) -> Plan:
     """Reads Base.xlsx (read-only) and decides where the rows go. Rows already in Base are skipped."""
+    from .progress import tick
     wb = openpyxl.load_workbook(base_path, read_only=True)
     ws = wb[SHEET]
+    total = ws.max_row
     existing: Set[str] = set()
     last_data = 1
     rows = []
     for i, r in enumerate(ws.iter_rows(min_row=1, max_col=NCOLS_CLEAR, values_only=True), start=1):
+        tick(progress, i, total)
         r = list(r) + [None] * (NCOLS_CLEAR - len(r))
         rows.append(r)
         o = text(r[C_ORDER - 1])

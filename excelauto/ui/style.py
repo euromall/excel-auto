@@ -69,5 +69,7 @@ QTableWidget {{ border: none; gridline-color: {LINE}; font-size: 13px; backgroun
 QHeaderView::section {{ background: white; color: {MUTED}; font-weight: 600; border: none; border-bottom: 1px solid {LINE}; padding: 8px; }}
 #statusLine {{ font-size: 13px; color: {MUTED}; }}
 #notice {{ background: {WARN_SOFT}; color: {WARN}; border-radius: 8px; padding: 10px 12px; font-size: 13px; }}
+QProgressBar {{ background: {ACCENT_SOFT}; border: none; border-radius: 5px; }}
+QProgressBar::chunk {{ background: {ACCENT}; border-radius: 5px; }}
 #noticeOk {{ background: {OK_SOFT}; color: {OK}; border-radius: 8px; padding: 10px 12px; font-size: 13px; }}
 """

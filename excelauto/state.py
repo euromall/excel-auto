@@ -63,6 +63,14 @@ class State:
         last = int(start) + count - 1
         return f'{last:0{len(start)}d}', f'{last + 1:0{len(start)}d}'
 
+    # --- how long work took (진행 팝업 "지난번 약 0:40") -------------------------
+    def duration(self, key: str):
+        return (self.data.get('durations') or {}).get(key)
+
+    def set_duration(self, key: str, seconds: float):
+        self.data.setdefault('durations', {})[key] = round(seconds, 1)
+        self.save()
+
     def set_backup(self, name: str):
         self.data['last_backup'] = name
         self.save()

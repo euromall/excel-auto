@@ -1,20 +1,23 @@
 """Main window, A안 (단계 안내형): steps on the left, the current step on the right."""
 import datetime as dt
+import glob
 import os
 import sys
+import time
 import traceback
 
-from PySide6.QtCore import QDate, QObject, QRunnable, Qt, QThreadPool, QUrl, Signal
+from PySide6.QtCore import QDate, QObject, QRunnable, Qt, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
-                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
-                               QPushButton, QSizePolicy, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
-                               QWidget, QAbstractItemView)
+from PySide6.QtWidgets import (QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame,
+                               QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMainWindow,
+                               QMessageBox, QProgressBar, QPushButton, QSizePolicy, QStackedWidget, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView)
 
-from .. import base_writer, job
+from .. import addition, base_writer, job, translate
 from ..base_ref import load_base
-from ..mango import read_mango
-from ..shipping import build_rows, last_hawb_in_pts
+from ..mango import localize, read_mango
+from ..progress import Cancelled, Progress
+from ..shipping import build_rows, names_missing_in_base
 from ..shopmine import read_shopmine
 from ..state import State, STATE_NAME
 from . import style
@@ -31,22 +34,41 @@ def program_dir() -> str:
 class _Signals(QObject):
     done = Signal(object)
     failed = Signal(str)
+    cancelled = Signal()
+    progress = Signal(int, int, str, int, int, bool)     # step, steps, text, done, total, cancellable
 
 
 class Task(QRunnable):
-    """Runs fn() off the window thread; done(result) or failed(message) comes back on it."""
+    """Runs fn(progress) off the window thread; done(result), failed(message) or cancelled() comes back."""
 
     def __init__(self, fn):
         super().__init__()
         self.fn = fn
         self.signals = _Signals()
+        self.progress = Progress(lambda *a: self.signals.progress.emit(*a))
 
     def run(self):
         try:
-            self.signals.done.emit(self.fn())
+            self.signals.done.emit(self.fn(self.progress))
+        except Cancelled:
+            self.signals.cancelled.emit()
         except Exception as e:     # any error is shown to the user, not raised in a worker thread
             traceback.print_exc()
             self.signals.failed.emit(str(e))
+
+
+def mmss(sec) -> str:
+    sec = int(round(sec))
+    return f'{sec // 60}:{sec % 60:02d}'
+
+
+def translator_for(settings):
+    """fn(list of Korean phrases) -> translations, or None when no DeepL key is saved."""
+    key = translate.load_key()
+    if not key:
+        return None
+    lang = settings.translate_lang or 'DE'
+    return lambda texts: translate.deepl_translate(texts, key, lang)
 
 
 # ---------------------------------------------------------------- small widgets
@@ -222,37 +244,61 @@ class Page(QWidget):
         pass
 
 
+
+
 class MangoPage(Page):
     def __init__(self, win):
-        super().__init__(win, 1, '망고 → Base', '망고 주문서를 망고변환 규칙으로 바꿔 Base.xlsx newPrice에 오늘 행으로 추가합니다.')
+        super().__init__(win, 1, '망고 → Base 추가분', '망고 주문서를 망고변환 규칙으로 바꿔 Base newPrice에 붙여 넣을 추가분 파일을 만듭니다. '
+                                                    'Base.xlsx는 읽기만 합니다.')
         f, lay = self.card('사용할 파일')
         grid = QGridLayout()
         grid.setSpacing(12)
         self.mango_card = FileCard('망고 주문서 · 가장 최근 파일 자동 선택', lambda: win.pick_setting('mango_dir', 'dir'))
-        self.base_card = FileCard('Base 품명표', lambda: win.pick_setting('base_file', 'file'))
+        self.base_card = FileCard('Base 품명표 (읽기만)', lambda: win.pick_setting('base_file', 'file'))
         grid.addWidget(self.mango_card, 0, 0)
         grid.addWidget(self.base_card, 0, 1)
         lay.addLayout(grid)
+        opn = QPushButton('오늘 추가분 파일 열기')
+        opn.setObjectName('link')
+        opn.setCursor(Qt.PointingHandCursor)
+        opn.clicked.connect(self.open_addition)
+        f.title_row.addWidget(opn)
+        self.done_note = label('', 'noticeOk', wrap=True)
+        lay.addWidget(self.done_note)
         self.body.addWidget(f)
         p, play = self.card('미리보기')
         self.chip_ok = label('', 'chipOk')
         self.chip_warn = label('', 'chipWarn')
+        words = QPushButton('단어장 열기')
+        words.setObjectName('link')
+        words.setCursor(Qt.PointingHandCursor)
+        words.clicked.connect(self.open_glossary)
         p.title_row.addWidget(self.chip_ok)
         p.title_row.addWidget(self.chip_warn)
+        p.title_row.addWidget(words)
+        self.notice = label('', 'notice', wrap=True)
+        play.addWidget(self.notice)
         self.table = make_table(['주문번호', 'Base에 들어갈 품명', '상태'], 1)
+        self.table.cellDoubleClicked.connect(self.edit_words)
         play.addWidget(self.table)
         self.body.addWidget(p, 1)
-        self.primary.setText('Base에 추가')
+        self.primary.setText('추가분 파일 만들기')
         self.primary.clicked.connect(self.run)
         self.file = ''
         self.plan = None
+        self.row_map = []          # table row -> BaseRow (None for skipped rows)
+
+    def glossary_path(self):
+        return os.path.join(self.win.root_dir, translate.GLOSSARY_NAME)
 
     def refresh(self):
         s = self.win.settings
+        self.show_done_note()
         self.plan = None
         self.primary.setEnabled(False)
         self.chip_ok.hide()
         self.chip_warn.hide()
+        self.notice.hide()
         self.table.setRowCount(0)
         self.base_card.set(os.path.basename(s.base_file) if s.base_file else '지정되지 않음', not s.base_file)
         try:
@@ -264,71 +310,138 @@ class MangoPage(Page):
             self.status.setText('설정에서 망고 폴더와 Base.xlsx를 지정하세요.')
             return
         self.status.setText('미리보기를 만드는 중…')
-        f, base = self.file, s.base_file
-        self.win.run_task(lambda: base_writer.make_plan(base, read_mango(f)), self.show_plan)
+        f, base, gpath, tr = self.file, s.base_file, self.glossary_path(), translator_for(s)
 
-    def show_plan(self, plan):
+        def work(p):
+            p.step(1, 3, '망고 주문서 읽기')
+            rows = read_mango(f, progress=p)
+            p.step(2, 3, 'Base에 이미 있는 주문 확인')
+            plan = base_writer.make_plan(base, rows, progress=p)
+            p.step(3, 3, '한글 단어 바꾸기' + (' (DeepL)' if tr else ''))
+            glossary = translate.Glossary(gpath)
+            err = ''
+            try:
+                translate.learn([br.full_name for br in plan.rows], glossary, tr)
+            except RuntimeError as e:
+                err = str(e)
+            localize(plan.rows, glossary)
+            return plan, err
+        self.win.run_task(work, self.show_plan, '미리보기 만드는 중', 'mango_preview')
+
+    def show_plan(self, res):
+        plan, err = res
         self.plan = plan
-        new = {br.order_no for br in plan.rows}
-        rows, warn = [], set()
+        rows, warn, self.row_map = [], set(), []
+        n_ko = 0
         for br in plan.rows:
-            rows.append((br.order_no, br.name, '새로 추가'))
+            ko = translate.has_hangul(br.name)
+            n_ko += ko
+            rows.append((br.order_no, br.name, '한글 입력 필요' if ko else '새로 추가'))
+            self.row_map.append(br)
+            if ko:
+                warn.add(len(rows) - 1)
         for s in plan.skipped:
             rows.append((s.split(' ')[0], '', '이미 Base에 있음'))
-            warn.add(len(rows) - 1)
+            self.row_map.append(None)
         fill_table(self.table, rows, warn)
-        self.chip_ok.setText(f'새로 추가 {len(new)}')
+        self.chip_ok.setText(f'새로 추가 {len(plan.rows)}')
         self.chip_ok.show()
-        if plan.skipped:
-            self.chip_warn.setText(f'이미 있음 {len(plan.skipped)}')
+        if n_ko:
+            self.chip_warn.setText(f'한글 {n_ko}')
             self.chip_warn.show()
-        self.primary.setEnabled(bool(plan.rows))
-        self.status.setText(f'Base.xlsx newPrice {plan.first_row}행부터 추가 · 실행 전 자동 백업' if plan.rows
-                            else '추가할 새 주문이 없습니다.')
+            msg = f'품명에 한글이 남은 주문이 {n_ko}건 있습니다. 주황색 행을 두 번 눌러 바꿀 단어를 입력하세요. 입력한 단어는 단어장에 저장되어 다음부터 자동으로 바뀝니다.'
+            if err:
+                msg += f'\nDeepL 번역을 쓰지 못했습니다: {err}'
+            elif not translate.load_key():
+                msg += '\n(설정에 DeepL API 키를 넣으면 처음 보는 단어도 자동으로 번역합니다.)'
+            self.notice.setText(msg)
+            self.notice.show()
+        self.primary.setEnabled(bool(plan.rows) and not n_ko)
+        if plan.rows:
+            self.status.setText(f'Base newPrice {plan.separator_row}행 날짜, {plan.first_row}행부터 붙여넣기 예정' +
+                                (' · 한글을 바꾼 뒤 만들 수 있음' if n_ko else ''))
+        else:
+            self.status.setText('추가할 새 주문이 없습니다.')
+
+    def edit_words(self, r, _c):
+        if not self.plan or r >= len(self.row_map) or self.row_map[r] is None:
+            return
+        br = self.row_map[r]
+        glossary = translate.Glossary(self.glossary_path())
+        todo = [p for p in dict.fromkeys(translate.phrases(translate.strip_labels(br.full_name)))
+                if not glossary.get(p)]
+        if not todo:
+            return
+        d = WordDialog(self, br.name, todo)
+        if d.exec() != QDialog.Accepted:
+            return
+        new = d.values()
+        bad = [v for v in new.values() if translate.has_hangul(v)]
+        if bad:
+            QMessageBox.warning(self, '단어 입력', '바꿀 말에는 한글을 쓸 수 없습니다: ' + ', '.join(bad))
+            return
+        glossary.add(new)
+        self.win.state.add('단어장 추가: ' + ', '.join(f'{k}→{v}' for k, v in new.items()))
+        localize(self.plan.rows, glossary)
+        self.show_plan((self.plan, ''))
+
+    def open_glossary(self):
+        path = self.glossary_path()
+        if not os.path.exists(path):
+            translate.Glossary(path).save()
+        self.win.open_path(path)
 
     def run(self):
         if not self.plan or not self.plan.rows:
             return
-        if QMessageBox.question(self, 'Base에 추가', 'Base.xlsx를 엑셀에서 닫았나요?\n실행 전 Base\\backup 폴더에 자동으로 백업합니다.') \
-                != QMessageBox.Yes:
+        if any(translate.has_hangul(br.name) for br in self.plan.rows):
             return
-        base, plan, day = self.win.settings.base_file, self.plan, self.win.day()
+        plan, day, base = self.plan, self.win.day(), self.win.settings.base_file
 
-        def work():
-            bak = base_writer.backup(base)
-            try:
-                base_writer.write_with_excel(base, plan, day)
-                return ('ok', bak, len(plan.rows))
-            except ImportError:
-                path = job._fallback_file(plan, day, os.path.dirname(os.path.abspath(base)))
-                return ('fallback', path, len(plan.rows))
+        def work(p):
+            p.step(1, 1, '추가분 파일 저장', cancellable=False)
+            return addition.write(plan.rows, addition.folder_for(base), day, plan.separator_row, plan.first_row)
         self.primary.setEnabled(False)
-        self.status.setText('엑셀로 Base.xlsx에 쓰는 중…')
-        self.win.run_task(work, self.finished)
+        self.win.run_task(work, self.finished, '추가분 파일 만드는 중', 'mango_write')
 
-    def finished(self, res):
-        kind, path, n = res
-        st = self.win.state
-        if kind == 'ok':
-            st.set_backup(os.path.basename(path))
-            st.mark(self.win.day(), 'mango', count=n)
-            st.add(f'Base.xlsx {n}건 추가 · 백업 {os.path.basename(path)}')
-            self.win.toast(f'Base.xlsx에 {n}건을 추가했습니다.')
-        else:
-            st.add(f'엑셀 자동 입력 불가 · 붙여넣기용 파일 {os.path.basename(path)}')
-            QMessageBox.information(self, 'Base에 추가', '엑셀 자동 입력을 쓸 수 없어 붙여넣기용 파일을 만들었습니다.\n' + path)
+    def finished(self, path):
+        plan, st = self.plan, self.win.state
+        n = len(plan.rows)
+        st.mark(self.win.day(), 'mango', count=n, file=os.path.basename(path), path=path,
+                sep_row=plan.separator_row, first_row=plan.first_row)
+        st.add(f'Base 추가분 파일 {n}건 · {os.path.basename(path)}')
+        self.win.open_path(path)
+        self.win.toast('추가분 파일을 만들고 열었습니다. Base.xlsx에 붙여 넣으세요.')
         self.win.update_steps()
         self.refresh()
+
+    def show_done_note(self):
+        info = self.win.state.step(self.win.day(), 'mango') or {}
+        if not info.get('file'):
+            self.done_note.hide()
+            return
+        day = self.win.day().isoformat()
+        self.done_note.setText(
+            f'오늘 추가분 파일: {info["file"]} ({info.get("count", 0)}건)\n'
+            f'Base.xlsx newPrice에 붙여 넣기: ① {info.get("sep_row", "?")}행 I열에 날짜 {day} '
+            f'② 추가분 파일 Base추가분 시트 A~S열 전체 복사 → {info.get("first_row", "?")}행 A열에 값 붙여넣기 ③ 저장\n'
+            f'2단계는 붙여 넣기 전에도 진행할 수 있고, 3단계(인보이스) 전에는 꼭 붙여 넣고 저장해야 합니다.')
+        self.done_note.show()
+
+    def open_addition(self):
+        info = self.win.state.step(self.win.day(), 'mango') or {}
+        if info.get('path') and os.path.exists(info['path']):
+            self.win.open_path(info['path'])
 
 
 class ShippingPage(Page):
     def __init__(self, win):
-        super().__init__(win, 2, '적하 작성', '샵마인 주문서와 Base 품명으로 인보이스용 Shipping 파일을 만듭니다.')
+        super().__init__(win, 2, '적하 작성', '샵마인 주문서와 Base 품명(오늘 추가분 포함)으로 인보이스용 Shipping 파일을 만듭니다.')
         f, lay = self.card('사용할 파일')
         grid = QGridLayout()
         grid.setSpacing(12)
         self.shop_card = FileCard('샵마인 주문서 · 가장 최근 파일 자동 선택', lambda: win.pick_setting('shopmine_dir', 'dir'))
-        self.base_card = FileCard('Base 품명표', lambda: win.pick_setting('base_file', 'file'))
+        self.base_card = FileCard('Base 품명표 + 오늘 추가분', lambda: win.pick_setting('base_file', 'file'))
         grid.addWidget(self.shop_card, 0, 0)
         grid.addWidget(self.base_card, 0, 1)
         lay.addLayout(grid)
@@ -343,10 +456,6 @@ class ShippingPage(Page):
         hrow.addLayout(hcol)
         self.hawb_hint = label('', 'statusLine')
         hrow.addWidget(self.hawb_hint, 1, Qt.AlignBottom)
-        pts = QPushButton('PTS에서 확인')
-        pts.setObjectName('link')
-        pts.clicked.connect(self.check_pts)
-        hrow.addWidget(pts, 0, Qt.AlignBottom)
         lay.addLayout(hrow)
         self.body.addWidget(f)
         p, play = self.card('미리보기')
@@ -356,13 +465,14 @@ class ShippingPage(Page):
         p.title_row.addWidget(self.chip_warn)
         self.notice = label('', 'notice', wrap=True)
         play.addWidget(self.notice)
-        self.table = make_table(['관리번호', '품명 (Base)', '수량', '상태'], 1)
+        self.table = make_table(['관리번호', '품명', '수량', '찾은 곳'], 1)
         play.addWidget(self.table)
         self.body.addWidget(p, 1)
         self.primary.setText('Shipping 파일 만들기')
         self.primary.clicked.connect(self.run)
         self.file = ''
         self.result = None
+        self.extra = []
 
     def refresh(self):
         s = self.win.settings
@@ -376,8 +486,12 @@ class ShippingPage(Page):
         if nxt and not self.hawb.text().strip():
             self.hawb.setText(nxt)
         self.hawb_hint.setText(f'지난 마지막 번호 {last} → 다음 번호 {nxt} (확인 후 실행)' if nxt
-                               else '첫 실행: 시작 번호를 직접 입력하세요.')
-        self.base_card.set(os.path.basename(s.base_file) if s.base_file else '지정되지 않음', not s.base_file)
+                               else '첫 실행: 시작 번호를 직접 입력하세요. 다음부터는 자동으로 제안합니다.')
+        self.extra = addition.files_for(addition.folder_for(s.base_file), self.win.day()) if s.base_file else []
+        base_txt = os.path.basename(s.base_file) if s.base_file else '지정되지 않음'
+        if self.extra:
+            base_txt += f' + 오늘 추가분 {len(self.extra)}개'
+        self.base_card.set(base_txt, not s.base_file)
         try:
             self.file = job.newest_shopmine(s.shopmine_dir) if s.shopmine_dir else ''
         except FileNotFoundError:
@@ -387,19 +501,23 @@ class ShippingPage(Page):
             self.status.setText('설정에서 샵마인 폴더와 Base.xlsx를 지정하세요.')
             return
         self.status.setText('미리보기를 만드는 중…')
-        f, base = self.file, s.base_file
+        f, base, extra = self.file, s.base_file, list(self.extra)
 
-        def work():
-            b = load_base(base)
-            return b, build_rows(read_shopmine(f), b)
-        self.win.run_task(work, self.show_result)
+        def work(p):
+            p.step(1, 2, '샵마인 주문서 읽기')
+            shop = read_shopmine(f)
+            p.step(2, 2, 'Base 품명 찾기')
+            b = load_base(base, extra, progress=p)
+            return b, build_rows(shop, b)
+        self.win.run_task(work, self.show_result, '미리보기 만드는 중', 'shipping_preview')
 
     def show_result(self, res):
         base, result = res
         self.result = result
         rows, warn = [], set()
-        for i, (no, name, qty, ok) in enumerate(result.preview):
-            rows.append((no, name if ok else 'Base에 없는 주문번호 — 1단계를 먼저 실행하세요', qty, '찾음' if ok else '확인 필요'))
+        for i, (no, name, qty, ok, src) in enumerate(result.preview):
+            where = ('Base' if src == 'newPrice' else '오늘 추가분') if ok else '확인 필요'
+            rows.append((no, name if ok else 'Base와 오늘 추가분 어디에도 없는 주문번호', qty, where))
             if not ok:
                 warn.add(i)
         fill_table(self.table, rows, warn)
@@ -409,8 +527,8 @@ class ShippingPage(Page):
         if result.missing:
             self.chip_warn.setText(f'확인 필요 {len(result.missing)}')
             self.chip_warn.show()
-            self.notice.setText('품명을 찾지 못한 주문이 있어 파일을 만들 수 없습니다. '
-                                '인보이스 프로그램은 품명이 없는 행을 건너뛰기 때문입니다.')
+            self.notice.setText('품명을 찾지 못한 주문이 있어 파일을 만들 수 없습니다. 인보이스 프로그램은 품명이 없는 행을 건너뛰기 때문입니다. '
+                                '1단계(추가분 파일)를 먼저 만들었는지 확인하세요.')
             self.notice.show()
         self.primary.setEnabled(bool(result.rows) and not result.missing)
         out = self.win.settings.output_dir
@@ -418,24 +536,16 @@ class ShippingPage(Page):
         if not out:
             self.primary.setEnabled(False)
 
-    def check_pts(self):
-        p = self.win.settings.pts_file
-        if not p:
-            QMessageBox.information(self, 'PTS', '설정에서 적하 파일(PTS)을 지정하세요.')
-            return
-        self.hawb_hint.setText('PTS 파일에서 마지막 번호를 찾는 중… (1~2분)')
-        self.win.run_task(lambda: last_hawb_in_pts(p),
-                          lambda last: self.hawb_hint.setText(f'PTS 마지막 송장번호: {last or "(없음)"}'))
-
     def run(self):
         s, day, hawb = self.win.settings, self.win.day(), self.hawb.text().strip()
         if not hawb and QMessageBox.question(self, '시작 송장번호', '시작 송장번호가 비어 있습니다. 그대로 만들까요?') != QMessageBox.Yes:
             return
         orders = len({p[0] for p in self.result.preview})
+        f, extra = self.file, list(self.extra)
         self.primary.setEnabled(False)
-        self.status.setText('Shipping 파일을 만드는 중…')
-        self.win.run_task(lambda: (job.run(self.file, s.base_file, s.output_dir, hawb, day, log=lambda m: None), hawb, orders),
-                          self.finished)
+        self.win.run_task(lambda p: (job.run(f, s.base_file, s.output_dir, hawb, day, log=lambda m: None,
+                                             extra_files=extra, progress=p), hawb, orders),
+                          self.finished, 'Shipping 파일 만드는 중', 'shipping_write')
 
     def finished(self, res):
         path, hawb, orders = res
@@ -454,22 +564,70 @@ class ShippingPage(Page):
 class InvoicePage(Page):
     def __init__(self, win):
         super().__init__(win, 3, '인보이스 실행', 'InvoiceAuto로 송장번호 부여, 인보이스, 적하목록(무게병합)을 만듭니다.')
+        c, clay = self.card('실행 전 확인: Shipping 품명이 Base.xlsx에 있는지')
+        self.check_ok = label('', 'noticeOk', wrap=True)
+        self.check_warn = label('', 'notice', wrap=True)
+        clay.addWidget(self.check_ok)
+        clay.addWidget(self.check_warn)
+        self.body.addWidget(c)
         f, lay = self.card('순서')
-        for t in ('1. InvoiceAuto를 열고 최신 Shipping 파일이 선택됐는지 확인', '2. 작업시작',
+        for t in ('1. 1단계 추가분을 Base.xlsx newPrice에 붙여 넣고 저장 (위 확인이 초록색이면 완료된 것)',
+                  '2. InvoiceAuto를 열고 최신 Shipping 파일이 선택됐는지 확인 → 작업시작',
                   '3. Result\\Profoma_날짜 폴더에 적하목록 취합_무게병합 파일이 생기면 완료'):
-            lay.addWidget(label(t, 'pageDesc'))
+            lay.addWidget(label(t, 'pageDesc', wrap=True))
         self.body.addWidget(f)
         self.body.addStretch(1)
         self.primary.setText('InvoiceAuto 열기')
         self.primary.clicked.connect(self.open_invoice)
+        self.missing = None
+
+    def shipping_file(self):
+        out = self.win.settings.output_dir
+        if not out or not os.path.isdir(out):
+            return ''
+        info = self.win.state.step(self.win.day(), 'shipping') or {}
+        p = os.path.join(out, info.get('file', '')) if info.get('file') else ''
+        if p and os.path.exists(p):
+            return p
+        fs = [x for x in glob.glob(os.path.join(out, 'Shipping_*.xlsx')) if not os.path.basename(x).startswith('~$')]
+        return max(fs, key=os.path.getmtime) if fs else ''
 
     def refresh(self):
-        exe = self.win.settings.invoice_exe
+        s = self.win.settings
+        exe = s.invoice_exe
         self.primary.setEnabled(bool(exe))
         self.status.setText(exe if exe else '설정에서 InvoiceAuto.exe 위치를 지정하면 여기서 바로 열 수 있습니다.')
+        self.check_ok.hide()
+        self.check_warn.hide()
+        self.missing = None
+        ship = self.shipping_file()
+        if not (ship and s.base_file):
+            self.check_warn.setText('확인할 Shipping 파일이 없습니다. 2단계를 먼저 실행하세요.')
+            self.check_warn.show()
+            return
+        base = s.base_file
+        self.win.run_task(lambda p: (os.path.basename(ship), names_missing_in_base(ship, base, progress=p)),
+                          self.show_check, 'Base 품명 확인 중', 'invoice_check')
+
+    def show_check(self, res):
+        name, missing = res
+        self.missing = missing
+        if missing:
+            more = f'\n…외 {len(missing) - 10}개' if len(missing) > 10 else ''
+            self.check_warn.setText(f'{name}의 품명 {len(missing)}개가 Base.xlsx newPrice에 없습니다. '
+                                    f'1단계 추가분을 붙여 넣고 저장했는지 확인하세요. InvoiceAuto가 이 품명을 찾지 못합니다.\n'
+                                    + '\n'.join('· ' + m for m in missing[:10]) + more)
+            self.check_warn.show()
+        else:
+            self.check_ok.setText(f'{name}의 품명이 모두 Base.xlsx에 있습니다.')
+            self.check_ok.show()
 
     def open_invoice(self):
         exe = self.win.settings.invoice_exe
+        if self.missing and QMessageBox.question(
+                self, 'InvoiceAuto', f'Base.xlsx에 없는 품명이 {len(self.missing)}개 있습니다. 그래도 InvoiceAuto를 열까요?') \
+                != QMessageBox.Yes:
+            return
         if exe and QDesktopServices.openUrl(QUrl.fromLocalFile(exe)):
             self.win.state.mark(self.win.day(), 'invoice')
             self.win.state.add('InvoiceAuto 실행')
@@ -503,11 +661,14 @@ class InfoPage(Page):
             QDesktopServices.openUrl(QUrl.fromLocalFile(p))
 
 
+
+
 # ---------------------------------------------------------------- dialogs
 class SettingsDialog(QDialog):
-    FIELDS = [('mango_dir', '망고 주문서 다운로드 폴더', 'dir'), ('base_file', 'Base.xlsx', 'file'),
+    FIELDS = [('mango_dir', '망고 주문서 다운로드 폴더', 'dir'), ('base_file', 'Base.xlsx (읽기만)', 'file'),
               ('shopmine_dir', '샵마인 다운로드 폴더', 'dir'), ('output_dir', '결과 폴더 (InvoiceAuto\\ShippingInvoice)', 'dir'),
               ('invoice_exe', 'InvoiceAuto.exe (선택)', 'file'), ('pts_file', '적하 파일 PTS xlsm (선택)', 'file')]
+    LANGS = [('DE', '독일어'), ('EN-GB', '영어')]
 
     def __init__(self, parent, settings):
         super().__init__(parent)
@@ -526,6 +687,19 @@ class SettingsDialog(QDialog):
             row.addWidget(b)
             form.addRow(cap, row)
             self.edits[key] = e
+        self.key_before = translate.load_key()
+        self.key = QLineEdit(self.key_before)
+        self.key.setEchoMode(QLineEdit.Password)
+        self.key.setPlaceholderText('없으면 비워 두기 (단어장만 사용)')
+        form.addRow('DeepL API 키 (선택)', self.key)
+        form.addRow('', label('키는 Windows 자격 증명 관리자에 저장됩니다. DeepL로는 한글 옵션 단어만 보내고 수령인 정보는 보내지 않습니다.',
+                              'statusLine', wrap=True))
+        self.lang = QComboBox()
+        for code, name in self.LANGS:
+            self.lang.addItem(name, code)
+        i = self.lang.findData(settings.translate_lang or 'DE')
+        self.lang.setCurrentIndex(max(i, 0))
+        form.addRow('한글을 바꿀 언어', self.lang)
         bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
@@ -537,7 +711,116 @@ class SettingsDialog(QDialog):
             e.setText(os.path.normpath(p))
 
     def values(self):
-        return {k: e.text().strip() for k, e in self.edits.items()}
+        v = {k: e.text().strip() for k, e in self.edits.items()}
+        v['translate_lang'] = self.lang.currentData()
+        return v
+
+    def new_key(self):
+        """The key when it was changed, else None."""
+        k = self.key.text().strip()
+        return None if k == self.key_before else k
+
+
+class WordDialog(QDialog):
+    """Asks the replacement for each Korean phrase of one item name."""
+
+    def __init__(self, parent, name, phrases):
+        super().__init__(parent)
+        self.setWindowTitle('한글 단어 바꾸기')
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+        lay.addWidget(label('품명: ' + name, 'pageDesc', wrap=True))
+        lay.addWidget(label('바꿀 말을 독일어나 영어로 입력하세요. 비워 두면 그 단어는 바꾸지 않습니다. 입력한 단어는 단어장에 저장됩니다.',
+                            'statusLine', wrap=True))
+        form = QFormLayout()
+        self.edits = {}
+        for p in phrases:
+            e = QLineEdit()
+            form.addRow(p + '  →', e)
+            self.edits[p] = e
+        lay.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def values(self):
+        return {k: e.text().strip() for k, e in self.edits.items() if e.text().strip()}
+
+
+class ProgressDialog(QDialog):
+    """진행 팝업: step n/m, a bar (real % when the row count is known), time used vs last time, cancel."""
+
+    def __init__(self, parent, title, last_seconds=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setWindowModality(Qt.WindowModal)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self.setMinimumWidth(460)
+        self.setStyleSheet(style.QSS)
+        self.start = time.monotonic()
+        self.last = last_seconds
+        self.cancel_cb = None
+        self.finished_ok = False
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 20, 24, 18)
+        lay.setSpacing(10)
+        self.step_label = label(title, 'cardTitle')
+        self.text = label('준비 중…', 'pageDesc', wrap=True)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 0)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(10)
+        self.time = label('', 'statusLine')
+        row = QHBoxLayout()
+        row.addWidget(self.time, 1)
+        self.cancel = QPushButton('취소')
+        self.cancel.setObjectName('secondary')
+        self.cancel.clicked.connect(self.ask_cancel)
+        row.addWidget(self.cancel)
+        for w in (self.step_label, self.text, self.bar):
+            lay.addWidget(w)
+        lay.addLayout(row)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.tick)
+        self.timer.start(1000)
+        self.tick()
+
+    def set(self, step, steps, text, done, total, cancellable):
+        if steps:
+            self.step_label.setText(f'{step}/{steps} 단계')
+        self.text.setText(text + (f'  ({done:,} / {total:,}행)' if total else ''))
+        if total:
+            self.bar.setRange(0, total)
+            self.bar.setValue(min(done, total))
+        else:
+            self.bar.setRange(0, 0)          # moving bar: length unknown (e.g. Excel saving)
+        self.cancel.setEnabled(cancellable and self.cancel_cb is not None)
+        self.cancel.setToolTip('' if cancellable else '파일을 쓰는 중에는 취소할 수 없습니다.')
+
+    def tick(self):
+        used = time.monotonic() - self.start
+        t = f'경과 {mmss(used)}'
+        if self.last:
+            t += f' · 지난번 약 {mmss(self.last)}'
+        self.time.setText(t)
+
+    def ask_cancel(self):
+        if self.cancel_cb:
+            self.cancel.setEnabled(False)
+            self.text.setText('취소하는 중…')
+            self.cancel_cb()
+
+    def close_done(self):
+        self.finished_ok = True
+        self.timer.stop()
+        self.accept()
+
+    def reject(self):                     # Esc / window X = cancel request, the dialog closes when the work stops
+        if self.finished_ok:
+            super().reject()
+        elif self.cancel.isEnabled():
+            self.ask_cancel()
 
 
 # ---------------------------------------------------------------- window
@@ -549,6 +832,7 @@ class MainWindow(QMainWindow):
     def __init__(self, root_dir=None):
         super().__init__()
         self.root_dir = root_dir or program_dir()
+        self.open_files = True          # tests turn this off (no Excel windows)
         self.ini = os.path.join(self.root_dir, job.INI_NAME)
         self.settings = job.load_settings(self.ini)
         self.state = State(os.path.join(self.root_dir, STATE_NAME))
@@ -636,7 +920,7 @@ class MainWindow(QMainWindow):
         box.setObjectName('backupBox')
         bl = QVBoxLayout(box)
         bl.setContentsMargins(12, 10, 12, 10)
-        bl.addWidget(label('마지막 백업', 'fileLabel'))
+        bl.addWidget(label('오늘 Base 추가분 파일', 'fileLabel'))
         self.backup_label = label('', 'fileName')
         self.backup_label.setWordWrap(True)
         bl.addWidget(self.backup_label)
@@ -652,7 +936,7 @@ class MainWindow(QMainWindow):
         info = {k: self.state.step(day, k) for k, _ in STEP_TITLES}
         current = next((i for i, (k, _) in enumerate(STEP_TITLES[:3]) if not info[k]), 2)
         subs = {
-            'mango': lambda d: f'완료 · {d.get("count", 0)}건 추가',
+            'mango': lambda d: f'완료 · 추가분 {d.get("count", 0)}건',
             'shipping': lambda d: f'완료 · {d.get("count", 0)}건',
             'invoice': lambda d: f'열었음 · {d.get("at", "")}',
         }
@@ -666,7 +950,7 @@ class MainWindow(QMainWindow):
                 b.set_state('current', '지금 할 차례')
             else:
                 b.set_state('pending', pending[k])
-        self.backup_label.setText(self.state.data.get('last_backup') or '아직 없음')
+        self.backup_label.setText((info.get('mango') or {}).get('file') or '아직 없음')
         if select_current:
             self.select(current)
 
@@ -676,20 +960,55 @@ class MainWindow(QMainWindow):
             b.setChecked(False)
         self.pages[i].refresh()
 
-    def run_task(self, fn, on_done):
+    def run_task(self, fn, on_done, title='', key='', delay_ms=400):
+        """Runs fn(progress) in the background. With a title, a 진행 팝업 opens when the work takes
+        longer than delay_ms; key remembers how long it took, shown as 지난번 next time."""
         t = Task(fn)
         self._tasks.add(t)
+        started = time.monotonic()
+        dlg = {'d': None, 'last': (None, None, None, None, None, True)}
 
-        def done(r, t=t):
+        def show_dialog():
+            if t not in self._tasks or not title:
+                return
+            d = ProgressDialog(self, title, self.state.duration(key) if key else None)
+            d.cancel_cb = lambda: setattr(t.progress, 'cancel_requested', True)
+            if dlg['last'][0] is not None:
+                d.set(*dlg['last'])
+            dlg['d'] = d
+            d.show()
+
+        def on_progress(*a):
+            dlg['last'] = a
+            if dlg['d']:
+                dlg['d'].set(*a)
+
+        def end(t=t):
             self._tasks.discard(t)
+            if dlg['d']:
+                dlg['d'].close_done()
+                dlg['d'] = None
+
+        def done(r):
+            end()
+            if key:
+                self.state.set_duration(key, time.monotonic() - started)
             on_done(r)
 
-        def failed(msg, t=t):
-            self._tasks.discard(t)
+        def failed(msg):
+            end()
             self.pages[self.stack.currentIndex()].status.setText('오류: ' + msg)
             QMessageBox.warning(self, '오류', msg)
+
+        def cancelled():
+            end()
+            self.pages[self.stack.currentIndex()].status.setText('취소했습니다.')
+        t.signals.progress.connect(on_progress)
         t.signals.done.connect(done)
         t.signals.failed.connect(failed)
+        t.signals.cancelled.connect(cancelled)
+        if title:
+            QTimer.singleShot(delay_ms, show_dialog)
         self.pool.start(t)
 
     def toast(self, text):
@@ -701,6 +1020,13 @@ class MainWindow(QMainWindow):
             for k, v in d.values().items():
                 setattr(self.settings, k, v)
             job.save_settings(self.ini, self.settings)
+            key = d.new_key()
+            if key is not None:
+                try:
+                    translate.save_key(key)
+                    self.state.add('DeepL API 키 ' + ('저장' if key else '삭제'))
+                except Exception as e:
+                    QMessageBox.warning(self, '설정', f'DeepL API 키를 저장하지 못했습니다: {e}')
             self.state.add('설정 저장')
             self.pages[self.stack.currentIndex()].refresh()
 
@@ -725,5 +1051,10 @@ class MainWindow(QMainWindow):
         lay.addWidget(lst)
         d.exec()
 
+    def open_path(self, path):
+        if self.open_files:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
     def come_forward(self):
         bring_to_front(self)
+

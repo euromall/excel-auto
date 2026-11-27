@@ -15,14 +15,16 @@ def main(argv=None):
     s.add_argument('--out', required=True, help='결과 폴더')
     s.add_argument('--hawb', default='', help='시작 송장번호')
     s.add_argument('--date', default=dt.date.today().isoformat())
-    m = sub.add_parser('mango', help='망고 주문서 -> Base.xlsx newPrice (2~3단계, Windows+Excel 필요)')
+    m = sub.add_parser('mango', help='망고 주문서 -> Base 추가분 파일 (2~3단계, Base.xlsx는 읽기만)')
     m.add_argument('--mango', required=True)
     m.add_argument('--base', required=True)
     m.add_argument('--date', default=dt.date.today().isoformat())
     a = p.parse_args(argv)
     if a.cmd == 'mango':
-        ok = job.run_mango(a.mango, a.base, dt.date.fromisoformat(a.date))
-        sys.exit(0 if ok else 2)
+        import os
+        from .translate import GLOSSARY_NAME
+        path = job.make_addition(a.mango, a.base, dt.date.fromisoformat(a.date), os.path.join(os.getcwd(), GLOSSARY_NAME))
+        sys.exit(0 if path else 2)
     if a.cmd == 'shipping':
         path = job.run(a.shopmine, a.base, a.out, a.hawb, dt.date.fromisoformat(a.date))
         sys.exit(0 if path else 2)
