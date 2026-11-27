@@ -124,34 +124,68 @@ def learn(names: Iterable[str], glossary: Glossary, translator) -> Dict[str, str
     return got
 
 
-# ---------------------------------------------------------------- API key in Windows 자격 증명 관리자
+# ---------------------------------------------------------------- API key
+# Saved next to the program as ExcelAuto_deepl.key, encrypted with Windows DPAPI (CryptProtectData):
+# only the same Windows user on the same PC can read it. (v0.4.1 used the Windows 자격 증명 관리자 through
+# pywin32, which did not keep the key in the built program.)
+KEY_NAME = 'ExcelAuto_deepl.key'
 _memory_key = {}
 
 
-def load_key() -> str:
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    class BLOB(ctypes.Structure):
+        _fields_ = [('cbData', wintypes.DWORD), ('pbData', ctypes.POINTER(ctypes.c_char))]
+    buf = ctypes.create_string_buffer(data, len(data))
+    src = BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    out = BLOB()
+    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
+    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    if not fn(ctypes.byref(src), None, None, None, None, 0x1, ctypes.byref(out)):    # 0x1: no UI
+        raise ctypes.WinError()
     try:
-        import win32cred
-        c = win32cred.CredRead(CRED_TARGET, win32cred.CRED_TYPE_GENERIC)
-        blob = c['CredentialBlob']
-        return blob.decode('utf-16-le') if isinstance(blob, bytes) else str(blob)
-    except ImportError:
-        return _memory_key.get('k') or os.environ.get('DEEPL_API_KEY', '')
-    except Exception:          # not saved yet
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        kernel32.LocalFree(ctypes.cast(out.pbData, ctypes.c_void_p))
+
+
+def load_key(folder: str) -> str:
+    """'' when no key is saved or it cannot be read."""
+    path = os.path.join(folder, KEY_NAME)
+    if os.name != 'nt':
+        return _memory_key.get(path, '')
+    try:
+        with open(path, 'rb') as f:
+            return _dpapi(f.read(), False).decode('utf-8')
+    except Exception:          # no file, or saved by another Windows user
         return ''
 
 
-def save_key(key: str):
+def save_key(folder: str, key: str):
+    """Saves (or with an empty key deletes) the key, then reads it back; raises when that fails."""
     key = key.strip()
-    try:
-        import win32cred
-    except ImportError:
-        _memory_key['k'] = key
-        return
-    if not key:
-        try:
-            win32cred.CredDelete(CRED_TARGET, win32cred.CRED_TYPE_GENERIC)
-        except Exception:
-            pass
-        return
-    win32cred.CredWrite({'Type': win32cred.CRED_TYPE_GENERIC, 'TargetName': CRED_TARGET, 'UserName': 'DeepL',
-                         'CredentialBlob': key, 'Persist': win32cred.CRED_PERSIST_LOCAL_MACHINE}, 0)
+    path = os.path.join(folder, KEY_NAME)
+    if os.name != 'nt':
+        _memory_key[path] = key
+    elif not key:
+        if os.path.exists(path):
+            os.remove(path)
+    else:
+        data = _dpapi(key.encode('utf-8'), True)
+        tmp = path + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(data)
+        os.replace(tmp, path)
+    if load_key(folder) != key:
+        raise RuntimeError(f'키를 저장한 뒤 다시 읽지 못했습니다: {path}')
+
+
+def mask(key: str) -> str:
+    return ('•' * 8 + key[-4:]) if len(key) > 4 else ('•' * len(key))
+
+
+def test_key(key: str, target: str = 'DE') -> str:
+    """One short request; returns the translation of 시험 or raises RuntimeError."""
+    return deepl_translate(['시험'], key, target, timeout=15)[0]

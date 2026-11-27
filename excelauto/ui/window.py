@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QComboBox, QDateEdit, QDialog, QDialogButtonBox, 
                                QMessageBox, QProgressBar, QPushButton, QSizePolicy, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget, QAbstractItemView)
 
-from .. import addition, base_writer, job, translate
+from .. import __version__, addition, base_writer, job, translate
 from ..base_ref import load_base
 from ..mango import localize, read_mango
 from ..progress import Cancelled, Progress
@@ -62,9 +62,9 @@ def mmss(sec) -> str:
     return f'{sec // 60}:{sec % 60:02d}'
 
 
-def translator_for(settings):
+def translator_for(settings, folder):
     """fn(list of Korean phrases) -> translations, or None when no DeepL key is saved."""
-    key = translate.load_key()
+    key = translate.load_key(folder)
     if not key:
         return None
     lang = settings.translate_lang or 'DE'
@@ -315,7 +315,7 @@ class MangoPage(Page):
             self.notice.show()
             return
         self.status.setText('미리보기를 만드는 중…')
-        f, base, gpath, tr = self.file, s.base_file, self.glossary_path(), translator_for(s)
+        f, base, gpath, tr = self.file, s.base_file, self.glossary_path(), translator_for(s, self.win.root_dir)
 
         def work(p):
             p.step(1, 3, '망고 주문서 읽기')
@@ -357,7 +357,7 @@ class MangoPage(Page):
             msg = f'품명에 한글이 남은 주문이 {n_ko}건 있습니다. 주황색 행을 두 번 눌러 바꿀 단어를 입력하세요. 입력한 단어는 단어장에 저장되어 다음부터 자동으로 바뀝니다.'
             if err:
                 msg += f'\nDeepL 번역을 쓰지 못했습니다: {err}'
-            elif not translate.load_key():
+            elif not translate.load_key(self.win.root_dir):
                 msg += '\n(설정에 DeepL API 키를 넣으면 처음 보는 단어도 자동으로 번역합니다.)'
             self.notice.setText(msg)
             self.notice.show()
@@ -711,13 +711,23 @@ class SettingsDialog(QDialog):
             row.addWidget(b)
             form.addRow(cap, row)
             self.edits[key] = e
-        self.key_before = translate.load_key()
+        self.folder = parent.root_dir
+        self.key_before = translate.load_key(self.folder)
+        krow = QHBoxLayout()
         self.key = QLineEdit(self.key_before)
         self.key.setEchoMode(QLineEdit.Password)
         self.key.setPlaceholderText('없으면 비워 두기 (단어장만 사용)')
-        form.addRow('DeepL API 키 (선택)', self.key)
-        form.addRow('', label('키는 Windows 자격 증명 관리자에 저장됩니다. DeepL로는 한글 옵션 단어만 보내고 수령인 정보는 보내지 않습니다.',
-                              'statusLine', wrap=True))
+        test = QPushButton('연결 시험')
+        test.setObjectName('iconBtn')
+        test.clicked.connect(self.test_key)
+        krow.addWidget(self.key, 1)
+        krow.addWidget(test)
+        form.addRow('DeepL API 키 (선택)', krow)
+        self.key_state = label('', 'statusLine', wrap=True)
+        self.key_state.setText((f'저장된 키: {translate.mask(self.key_before)}' if self.key_before else '저장된 키 없음')
+                               + ' · 프로그램 폴더에 Windows 암호화로 저장됩니다(이 PC의 이 사용자만 읽을 수 있음). '
+                                 'DeepL로는 한글 옵션 단어만 보내고 수령인 정보는 보내지 않습니다.')
+        form.addRow('', self.key_state)
         self.lang = QComboBox()
         for code, name in self.LANGS:
             self.lang.addItem(name, code)
@@ -738,6 +748,20 @@ class SettingsDialog(QDialog):
         v = {k: e.text().strip() for k, e in self.edits.items()}
         v['translate_lang'] = self.lang.currentData()
         return v
+
+    def test_key(self):
+        k = self.key.text().strip()
+        if not k:
+            QMessageBox.information(self, 'DeepL', '키를 먼저 입력하세요.')
+            return
+        self.setCursor(Qt.WaitCursor)
+        try:
+            got = translate.test_key(k, self.lang.currentData())
+            QMessageBox.information(self, 'DeepL', f'연결 성공: "시험" → "{got}"\n저장을 눌러야 키가 저장됩니다.')
+        except RuntimeError as e:
+            QMessageBox.warning(self, 'DeepL', str(e))
+        finally:
+            self.unsetCursor()
 
     def new_key(self):
         """The key when it was changed, else None."""
@@ -862,7 +886,7 @@ class MainWindow(QMainWindow):
         self.state = State(os.path.join(self.root_dir, STATE_NAME))
         self.pool = QThreadPool.globalInstance()
         self._tasks = set()
-        self.setWindowTitle('ExcelAuto · 주문·적하 일일 작업')
+        self.setWindowTitle(f'ExcelAuto v{__version__} · 주문·적하 일일 작업')
         self.resize(1200, 780)
         self.setMinimumSize(1000, 680)
         self.setStyleSheet(style.QSS)
@@ -909,6 +933,12 @@ class MainWindow(QMainWindow):
         lay.addWidget(logo)
         lay.addSpacing(10)
         lay.addLayout(col)
+        ver = QPushButton(f'v{__version__}')
+        ver.setObjectName('link')
+        ver.setCursor(Qt.PointingHandCursor)
+        ver.setToolTip('변경 기록 보기')
+        ver.clicked.connect(self.show_changes)
+        lay.addWidget(ver, 0, Qt.AlignTop)
         lay.addStretch(1)
         lay.addWidget(label('작업일', 'fileLabel'))
         self.date = QDateEdit(QDate.currentDate())
@@ -1047,8 +1077,9 @@ class MainWindow(QMainWindow):
             key = d.new_key()
             if key is not None:
                 try:
-                    translate.save_key(key)
+                    translate.save_key(self.root_dir, key)
                     self.state.add('DeepL API 키 ' + ('저장' if key else '삭제'))
+                    self.toast('DeepL API 키를 ' + ('저장했습니다.' if key else '지웠습니다.'))
                 except Exception as e:
                     QMessageBox.warning(self, '설정', f'DeepL API 키를 저장하지 못했습니다: {e}')
             self.state.add('설정 저장')
@@ -1073,6 +1104,23 @@ class MainWindow(QMainWindow):
         if not lst.count():
             lst.addItem('기록이 없습니다.')
         lay.addWidget(lst)
+        d.exec()
+
+    def show_changes(self):
+        base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        try:
+            with open(os.path.join(base, '변경기록.md'), encoding='utf-8') as f:
+                text = f.read()
+        except OSError:
+            text = '변경 기록 파일을 찾지 못했습니다.'
+        d = QDialog(self)
+        d.setWindowTitle(f'변경 기록 · 현재 v{__version__}')
+        d.resize(640, 520)
+        lay = QVBoxLayout(d)
+        from PySide6.QtWidgets import QTextBrowser
+        tb = QTextBrowser()
+        tb.setMarkdown(text)
+        lay.addWidget(tb)
         d.exec()
 
     def open_path(self, path):

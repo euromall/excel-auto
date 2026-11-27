@@ -263,3 +263,26 @@ class WindowTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class KeyTest(unittest.TestCase):
+    def test_save_load_delete(self):
+        """On Windows this runs the real DPAPI file; elsewhere the in-memory stand-in."""
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(translate.load_key(d), '')
+            translate.save_key(d, ' abc-123:fx ')
+            self.assertEqual(translate.load_key(d), 'abc-123:fx')
+            if os.name == 'nt':
+                with open(os.path.join(d, translate.KEY_NAME), 'rb') as f:
+                    self.assertNotIn(b'abc-123', f.read())          # not stored as plain text
+            translate.save_key(d, '')
+            self.assertEqual(translate.load_key(d), '')
+            self.assertEqual(translate.mask('abcdefgh:fx'), '••••••••h:fx')
+
+
+class VersionTest(unittest.TestCase):
+    def test_changelog_has_current_version(self):
+        from excelauto import __version__
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, '변경기록.md'), encoding='utf-8') as f:
+            self.assertIn(f'## v{__version__} ', f.read())

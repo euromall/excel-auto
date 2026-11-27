@@ -9,3 +9,5 @@ ExcelAuto.ini
 *.xlsm
 *.xls
 !tests/fixtures/*.xlsx
+ExcelAuto_state.json
+ExcelAuto_deepl.key
