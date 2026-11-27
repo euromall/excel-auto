@@ -89,7 +89,9 @@ class WindowTest(unittest.TestCase):
     def test_empty_settings(self):
         w = self.window()
         self.assertEqual(w.stack.currentIndex(), 0)
-        self.assertFalse(w.pages[0].primary.isEnabled())
+        b = w.pages[0].blockers()
+        self.assertTrue(b and all(need for _, need in b))          # settings missing -> 설정 열기
+        self.assertTrue(w.pages[0].primary.isEnabled())             # clickable: explains instead of greying out
         for i in range(5):
             w.select(i)
         w.close()
@@ -106,7 +108,7 @@ class WindowTest(unittest.TestCase):
         self.assertIsNotNone(page.plan)
         self.assertEqual([r.order_no for r in page.plan.rows], ['222'])
         self.assertEqual(page.table.rowCount(), 2)
-        self.assertTrue(page.primary.isEnabled())
+        self.assertEqual(page.blockers(), [])
         page.run()
         settle(self.app)
         files = addition.files_for(addition.folder_for(base), dt.date.today())
@@ -129,13 +131,13 @@ class WindowTest(unittest.TestCase):
         names = [br.name for br in page.plan.rows]
         self.assertEqual(names[0], 'Deo[02]75ml_15')                # label 크기: removed, nothing left in Korean
         self.assertIn('리스트레토', names[1])
-        self.assertFalse(page.primary.isEnabled())                   # Korean left: no file
+        self.assertIn('한글', page.blockers()[0][0])                   # Korean left: no file
         self.assertFalse(page.notice.isHidden())
         translate.Glossary(page.glossary_path()).add({'리스트레토': 'Ristretto'})
         page.refresh()
         settle(self.app)
         self.assertEqual(page.plan.rows[1].name, 'Kaffee[05]Ristretto_15')
-        self.assertTrue(page.primary.isEnabled())
+        self.assertEqual(page.blockers(), [])
         w.close()
 
     def test_shipping_preview_and_run(self):
@@ -153,7 +155,7 @@ class WindowTest(unittest.TestCase):
         page = w.pages[1]
         self.assertEqual(page.hawb.text(), '6067514454109')
         self.assertEqual(page.table.rowCount(), 2)
-        self.assertTrue(page.primary.isEnabled())
+        self.assertEqual(page.blockers(), [])
         page.run()
         settle(self.app)
         files = os.listdir(out)
@@ -176,7 +178,7 @@ class WindowTest(unittest.TestCase):
         w.select(1)
         settle(self.app)
         page = w.pages[1]
-        self.assertFalse(page.primary.isEnabled())
+        self.assertIn('품명을 찾지 못한 주문이 1건', page.blockers()[0][0])
         self.assertFalse(page.notice.isHidden())
         w.close()
 
@@ -195,7 +197,7 @@ class WindowTest(unittest.TestCase):
         w.select(1)
         settle(self.app)
         page = w.pages[1]
-        self.assertTrue(page.primary.isEnabled())
+        self.assertEqual(page.blockers(), [])
         self.assertEqual(page.table.item(1, 3).text(), '오늘 추가분')
         page.hawb.setText('6067514454102')
         page.run()

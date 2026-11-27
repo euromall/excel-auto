@@ -220,6 +220,10 @@ class Page(QWidget):
         self.primary = QPushButton('')
         self.primary.setObjectName('primary')
         self.primary.setCursor(Qt.PointingHandCursor)
+        self.primary.clicked.connect(self.on_primary)
+        self.action = None          # what the primary button does when nothing blocks it
+        self.loading = False        # a preview/check is still being made
+        self.why = ''               # why the input file was not found
         foot.addWidget(self.secondary)
         foot.addWidget(self.primary)
         outer.addLayout(foot)
@@ -243,7 +247,27 @@ class Page(QWidget):
     def refresh(self):
         pass
 
+    def blockers(self):
+        """[(what is missing / what to do, opens settings?)]; empty when the button may run."""
+        return []
 
+    def on_primary(self):
+        b = self.blockers()
+        if not b:
+            if self.action:
+                self.action()
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(self.primary.text())
+        box.setStyleSheet('QLabel { min-width: 460px; }')
+        box.setText('아직 실행할 수 없습니다. 아래를 먼저 해 주세요.')
+        box.setInformativeText('\n\n'.join(f'{i}. {t}' for i, (t, _) in enumerate(b, 1)))
+        go = box.addButton('설정 열기', QMessageBox.AcceptRole) if any(need for _, need in b) else None
+        box.addButton('확인', QMessageBox.RejectRole)
+        box.exec()
+        if go is not None and box.clickedButton() is go:
+            self.win.open_settings()
 
 
 class MangoPage(Page):
@@ -283,7 +307,7 @@ class MangoPage(Page):
         play.addWidget(self.table)
         self.body.addWidget(p, 1)
         self.primary.setText('추가분 파일 만들기')
-        self.primary.clicked.connect(self.run)
+        self.action = self.run
         self.file = ''
         self.plan = None
         self.row_map = []          # table row -> BaseRow (None for skipped rows)
@@ -295,7 +319,9 @@ class MangoPage(Page):
         s = self.win.settings
         self.show_done_note()
         self.plan = None
-        self.primary.setEnabled(False)
+        self.why = ''
+        self.loading = False
+        self.primary.setEnabled(True)
         self.chip_ok.hide()
         self.chip_warn.hide()
         self.notice.hide()
@@ -306,6 +332,7 @@ class MangoPage(Page):
             self.file = job.newest_mango(s.mango_dir) if s.mango_dir else ''
         except FileNotFoundError as e:
             self.file, why = '', str(e)
+        self.why = why
         self.mango_card.set(os.path.basename(self.file) if self.file else '망고 주문서를 찾지 못했습니다', not self.file)
         if not s.mango_dir or not s.base_file:
             self.status.setText('설정에서 망고 폴더와 Base.xlsx를 지정하세요.')
@@ -331,11 +358,13 @@ class MangoPage(Page):
                 err = str(e)
             localize(plan.rows, glossary)
             return plan, err
+        self.loading = True
         self.win.run_task(work, self.show_plan, '미리보기 만드는 중', 'mango_preview')
 
     def show_plan(self, res):
         plan, err = res
         self.plan = plan
+        self.loading = False
         rows, warn, self.row_map = [], set(), []
         n_ko = 0
         for br in plan.rows:
@@ -361,12 +390,36 @@ class MangoPage(Page):
                 msg += '\n(설정에 DeepL API 키를 넣으면 처음 보는 단어도 자동으로 번역합니다.)'
             self.notice.setText(msg)
             self.notice.show()
-        self.primary.setEnabled(bool(plan.rows) and not n_ko)
         if plan.rows:
             self.status.setText(f'Base newPrice {plan.separator_row}행 날짜, {plan.first_row}행부터 붙여넣기 예정' +
                                 (' · 한글을 바꾼 뒤 만들 수 있음' if n_ko else ''))
         else:
             self.status.setText('추가할 새 주문이 없습니다.')
+
+    def blockers(self):
+        s, b = self.win.settings, []
+        if not s.mango_dir:
+            b.append(('설정에서 "망고 주문서 다운로드 폴더"를 지정하세요.', True))
+        if not s.base_file:
+            b.append(('설정에서 "Base.xlsx" 위치를 지정하세요.', True))
+        if b:
+            return b
+        if not self.file:
+            return [((self.why or '망고 주문서를 찾지 못했습니다.') +
+                     '\n→ 망고에서 받은 주문서를 그 폴더에 저장하거나, 설정에서 폴더를 바꾸세요.', True)]
+        if self.loading or self.plan is None:
+            return [('미리보기를 만드는 중입니다. 표가 채워진 뒤 다시 누르세요.', False)]
+        if not self.plan.rows:
+            n = len(self.plan.skipped)
+            return [(f'새로 추가할 주문이 없습니다. 망고 주문서의 {n}건이 모두 이미 Base.xlsx에 있습니다.'
+                     '\n→ 새 망고 주문서를 받았는지 확인하세요.', False)]
+        ko = [br for br in self.plan.rows if translate.has_hangul(br.name)]
+        if ko:
+            ex = '\n'.join(f'   · {br.order_no}: {", ".join(translate.phrases(br.name))}' for br in ko[:5])
+            more = f'\n   …외 {len(ko) - 5}건' if len(ko) > 5 else ''
+            return [(f'품명에 한글이 남은 주문이 {len(ko)}건 있습니다.\n{ex}{more}'
+                     '\n→ 표의 주황색 행을 두 번 눌러 바꿀 단어(독일어/영어)를 입력하세요.', False)]
+        return []
 
     def edit_words(self, r, _c):
         if not self.plan or r >= len(self.row_map) or self.row_map[r] is None:
@@ -397,10 +450,6 @@ class MangoPage(Page):
         self.win.open_path(path)
 
     def run(self):
-        if not self.plan or not self.plan.rows:
-            return
-        if any(translate.has_hangul(br.name) for br in self.plan.rows):
-            return
         plan, day, base = self.plan, self.win.day(), self.win.settings.base_file
 
         def work(p):
@@ -487,7 +536,7 @@ class ShippingPage(Page):
         play.addWidget(self.table)
         self.body.addWidget(p, 1)
         self.primary.setText('Shipping 파일 만들기')
-        self.primary.clicked.connect(self.run)
+        self.action = self.run
         self.file = ''
         self.result = None
         self.extra = []
@@ -495,7 +544,9 @@ class ShippingPage(Page):
     def refresh(self):
         s = self.win.settings
         self.result = None
-        self.primary.setEnabled(False)
+        self.why = ''
+        self.loading = False
+        self.primary.setEnabled(True)
         self.chip_ok.hide()
         self.chip_warn.hide()
         self.notice.hide()
@@ -515,6 +566,7 @@ class ShippingPage(Page):
             self.file = job.newest_shopmine(s.shopmine_dir) if s.shopmine_dir else ''
         except FileNotFoundError as e:
             self.file, why = '', str(e)
+        self.why = why
         self.shop_card.set(os.path.basename(self.file) if self.file else '샵마인 파일을 찾지 못했습니다', not self.file)
         if not s.shopmine_dir or not s.base_file:
             self.status.setText('설정에서 샵마인 폴더와 Base.xlsx를 지정하세요.')
@@ -533,11 +585,13 @@ class ShippingPage(Page):
             p.step(2, 2, 'Base 품명 찾기')
             b = load_base(base, extra, progress=p)
             return b, build_rows(shop, b)
+        self.loading = True
         self.win.run_task(work, self.show_result, '미리보기 만드는 중', 'shipping_preview')
 
     def show_result(self, res):
         base, result = res
         self.result = result
+        self.loading = False
         rows, warn = [], set()
         for i, (no, name, qty, ok, src) in enumerate(result.preview):
             where = ('Base' if src == 'newPrice' else '오늘 추가분') if ok else '확인 필요'
@@ -554,11 +608,35 @@ class ShippingPage(Page):
             self.notice.setText('품명을 찾지 못한 주문이 있어 파일을 만들 수 없습니다. 인보이스 프로그램은 품명이 없는 행을 건너뛰기 때문입니다. '
                                 '1단계(추가분 파일)를 먼저 만들었는지 확인하세요.')
             self.notice.show()
-        self.primary.setEnabled(bool(result.rows) and not result.missing)
         out = self.win.settings.output_dir
         self.status.setText(f'저장 위치: {out}' if out else '설정에서 결과 폴더(InvoiceAuto\\ShippingInvoice)를 지정하세요.')
-        if not out:
-            self.primary.setEnabled(False)
+
+    def blockers(self):
+        s, b = self.win.settings, []
+        if not s.shopmine_dir:
+            b.append(('설정에서 "샵마인 다운로드 폴더"를 지정하세요.', True))
+        if not s.base_file:
+            b.append(('설정에서 "Base.xlsx" 위치를 지정하세요.', True))
+        if not s.output_dir:
+            b.append(('설정에서 "결과 폴더"(InvoiceAuto\\ShippingInvoice)를 지정하세요. Shipping 파일을 저장할 곳입니다.', True))
+        if not s.shopmine_dir or not s.base_file:
+            return b
+        if not self.file:
+            b.append(((self.why or '샵마인 주문서를 찾지 못했습니다.') +
+                      '\n→ 샵마인에서 받은 발송대기 파일을 그 폴더에 저장하거나, 설정에서 폴더를 바꾸세요.', True))
+            return b
+        if self.loading or self.result is None:
+            b.append(('미리보기를 만드는 중입니다. 표가 채워진 뒤 다시 누르세요.', False))
+            return b
+        r = self.result
+        if r.missing:
+            ex = '\n'.join('   · ' + m for m in r.missing[:5])
+            more = f'\n   …외 {len(r.missing) - 5}건' if len(r.missing) > 5 else ''
+            b.append((f'품명을 찾지 못한 주문이 {len(r.missing)}건 있습니다 (인보이스 프로그램이 이 행을 건너뜁니다).\n{ex}{more}'
+                      '\n→ 1단계에서 오늘 추가분 파일을 만들었는지, 망고 주문서에 이 주문이 있었는지 확인하세요.', False))
+        elif not r.rows:
+            b.append(('샵마인 주문서에 주문이 없습니다.', False))
+        return b
 
     def run(self):
         s, day, hawb = self.win.settings, self.win.day(), self.hawb.text().strip()
@@ -602,7 +680,7 @@ class InvoicePage(Page):
         self.body.addWidget(f)
         self.body.addStretch(1)
         self.primary.setText('InvoiceAuto 열기')
-        self.primary.clicked.connect(self.open_invoice)
+        self.action = self.open_invoice
         self.missing = None
 
     def shipping_file(self):
@@ -619,7 +697,7 @@ class InvoicePage(Page):
     def refresh(self):
         s = self.win.settings
         exe = s.invoice_exe
-        self.primary.setEnabled(bool(exe))
+        self.primary.setEnabled(True)
         self.status.setText(exe if exe else '설정에서 InvoiceAuto.exe 위치를 지정하면 여기서 바로 열 수 있습니다.')
         self.check_ok.hide()
         self.check_warn.hide()
@@ -646,6 +724,13 @@ class InvoicePage(Page):
             self.check_ok.setText(f'{name}의 품명이 모두 Base.xlsx에 있습니다.')
             self.check_ok.show()
 
+    def blockers(self):
+        if not self.win.settings.invoice_exe:
+            return [('설정에서 "InvoiceAuto.exe" 위치를 지정하세요. 지정하면 이 버튼으로 바로 엽니다.', True)]
+        if not os.path.exists(self.win.settings.invoice_exe):
+            return [(f'InvoiceAuto.exe를 찾지 못했습니다: {self.win.settings.invoice_exe}\n→ 설정에서 위치를 다시 지정하세요.', True)]
+        return []
+
     def open_invoice(self):
         exe = self.win.settings.invoice_exe
         if self.missing and QMessageBox.question(
@@ -669,15 +754,20 @@ class InfoPage(Page):
         self.setting = setting
         if button:
             self.primary.setText(button)
-            self.primary.clicked.connect(self.open_file)
+            self.action = self.open_file
         else:
             self.primary.hide()
 
     def refresh(self):
         if self.setting:
             p = getattr(self.win.settings, self.setting)
-            self.primary.setEnabled(bool(p))
+            self.primary.setEnabled(True)
             self.status.setText(p or '설정에서 파일 위치를 지정하세요.')
+
+    def blockers(self):
+        if self.setting and not getattr(self.win.settings, self.setting):
+            return [('설정에서 "적하 파일 PTS xlsm" 위치를 지정하세요.', True)]
+        return []
 
     def open_file(self):
         p = getattr(self.win.settings, self.setting)
@@ -1051,12 +1141,18 @@ class MainWindow(QMainWindow):
 
         def failed(msg):
             end()
-            self.pages[self.stack.currentIndex()].status.setText('오류: ' + msg)
+            page = self.pages[self.stack.currentIndex()]
+            page.loading = False
+            page.primary.setEnabled(True)
+            page.status.setText('오류: ' + msg)
             QMessageBox.warning(self, '오류', msg)
 
         def cancelled():
             end()
-            self.pages[self.stack.currentIndex()].status.setText('취소했습니다.')
+            page = self.pages[self.stack.currentIndex()]
+            page.loading = False
+            page.primary.setEnabled(True)
+            page.status.setText('취소했습니다.')
         t.signals.progress.connect(on_progress)
         t.signals.done.connect(done)
         t.signals.failed.connect(failed)
