@@ -1,10 +1,10 @@
 Attribute VB_Name = "ShipScan"
 '==============================================================
-' 출고 체크 매크로 v2 (2026-11-27)
+' 출고 체크 매크로 v3 (2026-11-28)
 ' - 대상: 실행할 때 열려 있는 적하 시트(PTS_YYMM)
 ' - 먼저 출고할 행들을 선택(여러 행, Ctrl로 떨어진 구간도 가능)한 뒤 실행
 ' - 선택한 행 안에서만 송장번호(B열)를 찾음. 선택 밖은 처리하지 않음
-' - 스캔되면: 행 전체 연두색 + AI열에 출고일
+' - 스캔되면: A~C열(송장과 양옆)만 연두색 + AI열에 출고일. 나머지 열의 기존 색은 그대로
 ' - AI열에 이미 값이 있는 행은 덮어쓰지 않음 (출고일이면 중복, 다른 값이면 건너뜀)
 ' - 별도 기록 시트는 만들지 않음. 기존 ScanCheckDuplicates 매크로는 그대로
 '==============================================================
@@ -13,6 +13,8 @@ Option Explicit
 ' ---- 설정 (열 위치가 바뀌면 여기만 수정) ----
 Private Const COL_HAWB As String = "B"        ' 송장번호(HAWB)
 Private Const COL_SHIP As String = "AI"       ' 출고일을 넣는 열
+Private Const MARK_FROM As String = "A"       ' 색칠 시작 열
+Private Const MARK_TO As String = "C"         ' 색칠 끝 열
 Private Const FIRST_ROW As Long = 7           ' 데이터 시작 행
 Private Const SHIP_COLOR As Long = 13434828   ' 연두색 RGB(204,255,204)
 Private Const DATE_FORMAT As String = "yyyy-mm-dd"
@@ -97,8 +99,13 @@ Private Function ShipState(ws As Worksheet, ByVal r As Long) As Integer
     End If
 End Function
 
+' 색칠할 칸 (예: A7:C7)
+Private Function MarkRange(ws As Worksheet, ByVal r As Long) As Range
+    Set MarkRange = ws.Range(MARK_FROM & r & ":" & MARK_TO & r)
+End Function
+
 Private Sub MarkShipped(ws As Worksheet, ByVal r As Long, ByVal shipDate As Date)
-    ws.Rows(r).Interior.Color = SHIP_COLOR
+    MarkRange(ws, r).Interior.Color = SHIP_COLOR
     With ws.Range(COL_SHIP & r)
         .NumberFormat = DATE_FORMAT
         .Value = shipDate
@@ -207,7 +214,7 @@ Public Sub ShipScan_BulkDate()
 End Sub
 
 '==============================================================
-' 3) 취소: 선택한 행의 출고일과 색상을 지움 (출고일이 있는 행만)
+' 3) 취소: 선택한 행의 출고일과 A~C열 색상을 지움 (출고일이 있는 행만)
 '==============================================================
 Public Sub ShipScan_Cancel()
     Dim ws As Worksheet, selRows As Object, r As Variant, n As Long
@@ -215,12 +222,12 @@ Public Sub ShipScan_Cancel()
     Set ws = ActiveSheet
     Set selRows = SelectedRows(ws)
     If selRows.Count = 0 Then MsgBox "취소할 행을 선택하세요.", vbExclamation: Exit Sub
-    If MsgBox("선택한 " & selRows.Count & "행 중 출고일이 있는 행의 출고일과 행 색상을 지웁니다.", _
+    If MsgBox("선택한 " & selRows.Count & "행 중 출고일이 있는 행의 출고일과 " & MARK_FROM & "~" & MARK_TO & "열 색상을 지웁니다.", _
               vbOKCancel Or vbQuestion, "출고 취소") = vbCancel Then Exit Sub
     For Each r In selRows.Keys
         If ShipState(ws, CLng(r)) = 1 Then
             ws.Range(COL_SHIP & r).ClearContents
-            ws.Rows(r).Interior.ColorIndex = xlNone
+            MarkRange(ws, CLng(r)).Interior.ColorIndex = xlNone
             n = n + 1
         End If
     Next r
