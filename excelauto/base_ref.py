@@ -5,6 +5,7 @@ so the shipping file must carry that same name. Today this name is looked up by 
 00_주문재고변환 (sheet 변환), whose 목록 sheet is a copy of newPrice F:L. Reading newPrice
 directly gives the same result without the copy step.
 """
+import os
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -22,6 +23,7 @@ COL_NAME = 8     # I  품명/100자
 class BaseItem:
     row: int
     name: str
+    source: str = 'newPrice'
 
 
 class BaseRef:
@@ -37,14 +39,19 @@ class BaseRef:
         return self.by_order.get(k) or self.by_asin.get(k)
 
 
-def load_base(path) -> BaseRef:
+def load_base(path, extra_files=(), progress=None) -> BaseRef:
+    """newPrice rows, then the rows of `extra_files` (추가분 files, newest last: they win)."""
+    from .progress import tick
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     if SHEET not in wb.sheetnames:
         wb.close()
         raise ValueError(f'Base 파일에 "{SHEET}" 시트가 없습니다: {path}')
     by_order: Dict[str, BaseItem] = {}
     by_asin: Dict[str, BaseItem] = {}
-    for row_no, r in enumerate(wb[SHEET].iter_rows(min_row=2, values_only=True), start=2):
+    ws = wb[SHEET]
+    total = ws.max_row
+    for row_no, r in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        tick(progress, row_no, total)
         if len(r) <= COL_NAME:
             continue
         name = text(r[COL_NAME])
@@ -59,4 +66,13 @@ def load_base(path) -> BaseRef:
         if a:
             by_asin[a] = item
     wb.close()
+    from .addition import read_items
+    for f in extra_files:
+        src = os.path.basename(f)
+        for i, (o, a, name) in enumerate(read_items(f), start=1):
+            item = BaseItem(row=i, name=name, source=src)
+            if key(o):
+                by_order[key(o)] = item
+            if key(a):
+                by_asin[key(a)] = item
     return BaseRef(by_order, by_asin)

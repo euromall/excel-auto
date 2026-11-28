@@ -97,3 +97,16 @@ class ShippingTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FindShopmineTest(unittest.TestCase):
+    def test_found_by_header_when_name_differs(self):
+        with tempfile.TemporaryDirectory() as d:
+            other = openpyxl.Workbook()
+            other.active.append(['마켓주문일자', 'x'])
+            other.save(os.path.join(d, 'mango.xlsx'))
+            make_shopmine(os.path.join(d, '주문목록_2026-11-27.xlsx'), [shop_row('M1', '111', '111', 1)])
+            self.assertEqual(os.path.basename(job.newest_shopmine(d)), '주문목록_2026-11-27.xlsx')
+            os.remove(os.path.join(d, '주문목록_2026-11-27.xlsx'))
+            with self.assertRaises(FileNotFoundError):
+                job.newest_shopmine(d)

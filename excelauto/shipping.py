@@ -32,6 +32,7 @@ class BuildResult:
     rows: List[list] = field(default_factory=list)       # 78 values per row
     missing: List[str] = field(default_factory=list)     # rows whose item name was not found
     found_rows: List[str] = field(default_factory=list)  # log lines
+    preview: List[tuple] = field(default_factory=list)   # (관리번호, 품명 or '', 수량, ok, 찾은 곳) per 샵마인 row
 
 
 def build_rows(shop_rows: List[ShopmineRow], base: BaseRef, start_hawb: str = '') -> BuildResult:
@@ -41,7 +42,9 @@ def build_rows(shop_rows: List[ShopmineRow], base: BaseRef, start_hawb: str = ''
         item = base.find(no)
         if item is None:
             res.missing.append(f'샵마인 {sr.row}행 {sr.manage_no}: 번호 {no or "(없음)"} 이(가) Base newPrice에 없음')
+            res.preview.append((sr.manage_no, '', sr.qty, False, ''))
             continue
+        res.preview.append((sr.manage_no, item.name, sr.qty, True, item.source))
         v = [None] * NCOLS
         v[0] = '-'
         v[2:19] = sr.block()                     # C..S  <- 샵마인 F..V
@@ -53,7 +56,7 @@ def build_rows(shop_rows: List[ShopmineRow], base: BaseRef, start_hawb: str = ''
         v[C_ITEM - 1] = item.name                # AC 품명 (Base newPrice I)
         v[C_QTY - 1] = sr.qty                    # AF 수량 (샵마인 AI)
         res.rows.append(v)
-        res.found_rows.append(f'{sr.manage_no}: newPrice {item.row}행 "{item.name[:40]}" x{sr.qty}')
+        res.found_rows.append(f'{sr.manage_no}: {item.source} {item.row}행 "{item.name[:40]}" x{sr.qty}')
     if res.rows and start_hawb:
         res.rows[0][C_HAWB - 1] = int(start_hawb) if start_hawb.isdigit() else start_hawb
     return res
@@ -94,3 +97,25 @@ def last_hawb_in_pts(path: str, sheet: str = '') -> str:
                 best = s
     wb.close()
     return best
+
+
+def names_in_shipping(path: str) -> List[str]:
+    """품명 (AC) of every data row of a Shipping file."""
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb.worksheets[0]
+    out = [text(r[0]) for r in ws.iter_rows(min_row=2, min_col=C_ITEM, max_col=C_ITEM, values_only=True) if text(r[0])]
+    wb.close()
+    return out
+
+
+def names_missing_in_base(shipping_file: str, base_file: str, progress=None) -> List[str]:
+    """Item names of the Shipping file that newPrice column I lacks (InvoiceAuto would not find them)."""
+    from .base_ref import load_base
+    base = load_base(base_file, progress=progress)
+    have = {i.name for i in base.by_order.values()} | {i.name for i in base.by_asin.values()}
+    seen, out = set(), []
+    for n in names_in_shipping(shipping_file):
+        if n not in have and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
